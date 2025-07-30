@@ -35,7 +35,7 @@ multinode: false
 modelArtifacts:
   uri: $LLMDBENCH_VLLM_MODELSERVICE_URI
   size: $LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE
-  authSecretName: "llm-d-hf-token"
+  authSecretName: $LLMDBENCH_HF_TOKEN
   name: $(model_attribute $model model)
 
 routing:
@@ -45,6 +45,7 @@ routing:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: infra-${LLMDBENCH_VLLM_MODELSERVICE_RELEASE}-inference-gateway
+      namespace: $LLMDBENCH_VLLM_MODELSERVICE_GATEWAY_NAMESPACE
   proxy:
     secure: false
   inferenceModel:
@@ -52,11 +53,18 @@ routing:
   inferencePool:
     create: false
     name: gaie-${LLMDBENCH_VLLM_MODELSERVICE_RELEASE}
-  httpRoute:
-    create: $(echo $LLMDBENCH_VLLM_MODELSERVICE_ROUTE | $LLMDBENCH_CONTROL_SCMD -e 's/^0/false/' -e 's/1/true/')
-
   epp:
     create: false
+
+  # Create just HTTPRoute object
+  httpRoute:
+    create: $(echo $LLMDBENCH_VLLM_MODELSERVICE_ROUTE | $LLMDBENCH_CONTROL_SCMD -e 's/^0/false/' -e 's/1/true/')
+    # This might break benchmarking and CICD tests since it introduces a new header in the request
+    # matches:
+    # - headers:
+    #   - name: x-model-name
+    #     type: Exact
+    #     value: {{ .Values.modelArtifacts.name }}
 
 decode:
   create: $(echo $LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS | $LLMDBENCH_CONTROL_SCMD -e 's/^0/false/' -e 's/[1-9].*/true/')
