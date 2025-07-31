@@ -33,6 +33,19 @@ function model_attribute {
     "llama-8b") local model=meta-llama/Llama-3.1-8B-Instruct ;;
     "llama-70b") local model=meta-llama/Llama-3.1-70B-Instruct ;;
     "llama-17b") local model=meta-llama/Llama-4-Scout-17B-16E-Instruct ;;
+    "random/model")
+      # Special handling for random/model
+      case "$attribute" in
+        model) echo "random/model" ;;
+        type) echo "random" ;;
+        parameters) echo "random" ;;
+        majorversion) echo "0" ;;
+        kind) echo "random" ;;
+        label) echo "random-model" ;;
+        *) echo "random" ;;
+      esac
+      return 0
+      ;;
     *)
       true ;;
   esac

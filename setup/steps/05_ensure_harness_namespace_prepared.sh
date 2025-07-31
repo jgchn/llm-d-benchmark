@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -x
 source ${LLMDBENCH_CONTROL_DIR}/env.sh
 
 if [[ $LLMDBENCH_RUN_EXPERIMENT_ANALYZE_LOCALLY -eq 0 ]]; then
