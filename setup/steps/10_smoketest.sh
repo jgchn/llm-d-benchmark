@@ -10,10 +10,10 @@ if [[ $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_STANDALONE_ACTIVE -eq 1 ]]; then
   service_ip=$(echo "${service}" | awk '{print $3}')
 else
   pod_string=decode
-  route_string=${LLMDBENCH_VLLM_MODELSERVICE_RELEASE}-inference-gateway
+  route_string=${LLMDBENCH_VLLM_MODELSERVICE_RELEASE}-inference-gateway-istio
 
   if [[ $LLMDBENCH_CONTROL_ENVIRONMENT_TYPE_MODELSERVICE_ACTIVE -eq 1 ]]; then
-    service=$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_VLLM_COMMON_NAMESPACE" get gateway --no-headers | grep ^infra-${LLMDBENCH_VLLM_MODELSERVICE_RELEASE}-inference-gateway)
+    service=$(${LLMDBENCH_CONTROL_KCMD} --namespace "$LLMDBENCH_VLLM_COMMON_NAMESPACE" get gateway --no-headers | grep ^infra-${LLMDBENCH_VLLM_MODELSERVICE_RELEASE}-inference-gateway-istio)
   fi
 
   service_name=$(echo "${service}" | awk '{print $1}')
@@ -61,6 +61,8 @@ for model in ${LLMDBENCH_DEPLOY_MODEL_LIST//,/ }; do
     announce "❌ Unable to find IP for service/gateway \"${service}\"!"
     exit 1
   fi
+
+  echo $service_ip
 
   if [[ -z $(not_valid_ip ${service_ip}) ]]; then
     announce "❌ Invalid IP (\"${service_ip}\") for service/gateway \"${service_name}\"!"
