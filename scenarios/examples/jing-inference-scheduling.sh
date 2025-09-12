@@ -70,7 +70,7 @@ export LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS="[\
 export LLMDBENCH_VLLM_MODELSERVICE_DECODE_ACCELERATOR_NR=1
 
 # Local directory to copy benchmark runtime files and results
-export LLMDBENCH_CONTROL_WORK_DIR=~/data/inference-scheduling-pd-
+export LLMDBENCH_CONTROL_WORK_DIR=~/data/inference-scheduling-run2
 
 # Cluster control My stuff
 export LLMDBENCH_VLLM_COMMON_NAMESPACE=jchen

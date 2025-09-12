@@ -9,11 +9,11 @@
 # Many commonly defined values were left blank (default) so that this scenario is applicable to as many environments as possible.
 
 # Model parameters
-# export LLMDBENCH_DEPLOY_MODEL_LIST="Qwen/Qwen3-0.6B"
+export LLMDBENCH_DEPLOY_MODEL_LIST="Qwen/Qwen3-0.6B"
 # export LLMDBENCH_DEPLOY_MODEL_LIST="facebook/opt-125m"
-export LLMDBENCH_DEPLOY_MODEL_LIST="meta-llama/Llama-3.1-8B-Instruct"
+# export LLMDBENCH_DEPLOY_MODEL_LIST="meta-llama/Llama-3.1-8B-Instruct"
 #export LLMDBENCH_DEPLOY_MODEL_LIST="meta-llama/Llama-3.1-70B-Instruct"
-export LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE=1Ti
+export LLMDBENCH_VLLM_COMMON_PVC_MODEL_CACHE_SIZE=300Gi
 
 
 # Workload parameters
@@ -21,7 +21,9 @@ export LLMDBENCH_HARNESS_EXPERIMENT_PROFILE=shared_prefix_synthetic.yaml
 export LLMDBENCH_HARNESS_NAME=inference-perf
 
 # Routing configuration (via gaie)
-#export LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE="plugins-v2.yaml" (default is default-plugins.yaml)
+# export LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE="epp-config-with-prefix-cache-scorer.yaml"
+export LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE="plugins-v2.yaml"
+export LLMDBENCH_VLLM_MODELSERVICE_INFERENCE_MODEL=true
 export LLMDBENCH_LLMD_INFERENCESCHEDULER_IMAGE_TAG=v0.2.1
 
 # Routing configuration (via modelservice)
@@ -33,7 +35,7 @@ export LLMDBENCH_VLLM_COMMON_MAX_MODEL_LEN=16000
 export LLMDBENCH_VLLM_COMMON_BLOCK_SIZE=64
 
 #             Affinity to select node with appropriate accelerator (leave uncommented to automatically detect GPU)
-#export LLMDBENCH_VLLM_COMMON_AFFINITY=nvidia.com/gpu.product:NVIDIA-H100-80GB-HBM3
+export LLMDBENCH_VLLM_COMMON_AFFINITY=nvidia.com/gpu.product:NVIDIA-H100-80GB-HBM3
 #export LLMDBENCH_VLLM_COMMON_AFFINITY=gpu.nvidia.com/model:H200
 #export LLMDBENCH_VLLM_COMMON_AFFINITY=nvidia.com/gpu.product:NVIDIA-L40S
 #export LLMDBENCH_VLLM_COMMON_AFFINITY=nvidia.com/gpu.product:NVIDIA-A100-SXM4-80GB
@@ -73,7 +75,22 @@ EOF
 export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_REPLICAS=0
 
 # Decode parameters
-export LLMDBENCH_VLLM_MODELSERVICE_DECODE_TENSOR_PARALLELISM=4
+export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_TENSOR_PARALLELISM=1
+export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_CPU_NR=16
+export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_CPU_MEM=64Gi
+
+# Uncomment the following line to enable multi-nic
+export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_MODEL_COMMAND=vllmServe
+export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_EXTRA_ARGS="[\
+--block-size____REPLACE_ENV_LLMDBENCH_VLLM_COMMON_BLOCK_SIZE____\
+--kv-transfer-config____'{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'____\
+--disable-log-requests____\
+--disable-uvicorn-access-log____\
+--max-model-len____REPLACE_ENV_LLMDBENCH_VLLM_COMMON_MAX_MODEL_LEN\
+]"
+export LLMDBENCH_VLLM_MODELSERVICE_PREFILL_ACCELERATOR_NR=0
+
+export LLMDBENCH_VLLM_MODELSERVICE_DECODE_TENSOR_PARALLELISM=1
 export LLMDBENCH_VLLM_MODELSERVICE_DECODE_CPU_NR=16
 export LLMDBENCH_VLLM_MODELSERVICE_DECODE_CPU_MEM=64Gi
 export LLMDBENCH_VLLM_MODELSERVICE_DECODE_REPLICAS=2
@@ -93,6 +110,12 @@ export LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS="[\
 --disable-uvicorn-access-log____\
 --max-model-len____REPLACE_ENV_LLMDBENCH_VLLM_COMMON_MAX_MODEL_LEN\
 ]"
+export LLMDBENCH_VLLM_MODELSERVICE_DECODE_ACCELERATOR_NR=1
 
 # Local directory to copy benchmark runtime files and results
-export LLMDBENCH_CONTROL_WORK_DIR=~/data/inference-scheduling
+export LLMDBENCH_CONTROL_WORK_DIR=~/data/inference-scheduling-pd-
+
+
+# My stuff
+export LLMDBENCH_VLLM_COMMON_NAMESPACE=jchen
+export LLMDBENCH_HARNESS_NAMESPACE=jchen
