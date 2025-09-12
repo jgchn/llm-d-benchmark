@@ -1,0 +1,37 @@
+setup:
+  factors:
+    # Variables
+    - LLMDBENCH_DEPLOY_MODEL_LIST
+    - LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE
+  levels:
+    LLMDBENCH_DEPLOY_MODEL_LIST: "Qwen/Qwen3-0.6B,Qwen/Qwen3-1.7B"
+    LLMDBENCH_VLLM_MODELSERVICE_GAIE_PLUGINS_CONFIGFILE: "epp-config-no-prefix-cache-scorer.yaml,epp-config-with-prefix-cache-scorer.yaml"
+  treatments:
+    - "Qwen/Qwen3-0.6B,epp-config-no-prefix-cache-scorer.yaml"
+    - "Qwen/Qwen3-0.6B,epp-config-with-prefix-cache-scorer.yaml"
+    - "Qwen/Qwen3-1.7B,epp-config-no-prefix-cache-scorer.yaml"
+    - "Qwen/Qwen3-1.7B,epp-config-with-prefix-cache-scorer.yaml"
+run:
+  factors:
+    - question_len
+    - output_len
+  levels:
+    question_len: "128,256,512,1024"
+    output_len: "128,256,512,1024"
+  treatments:
+    - "128,128"
+    - "128,256"
+    - "128,512"
+    - "128,1024"
+    - "256,128"
+    - "256,256"
+    - "256,512"
+    - "256,1024"
+    - "512,128"
+    - "512,256"
+    - "512,512"
+    - "512,1024"
+    - "1024,128"
+    - "1024,256"
+    - "1024,512"
+    - "1024,1024"
