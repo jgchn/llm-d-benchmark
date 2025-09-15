@@ -58,3 +58,4 @@ venv.bak/
 environment/
 
 scenarios/none.sh
+.analysis

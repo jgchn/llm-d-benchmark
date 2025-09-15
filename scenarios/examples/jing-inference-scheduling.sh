@@ -70,8 +70,17 @@ export LLMDBENCH_VLLM_MODELSERVICE_DECODE_EXTRA_ARGS="[\
 export LLMDBENCH_VLLM_MODELSERVICE_DECODE_ACCELERATOR_NR=1
 
 # Local directory to copy benchmark runtime files and results
-export LLMDBENCH_CONTROL_WORK_DIR=~/data/inference-scheduling-run2
+export LLMDBENCH_CONTROL_WORK_DIR=~/data/qwen0-6/inf-sche-9-14
+export LLMDBENCH_CONTROL_WORK_DIR=~/data/qwen0-6/inf-sche-9-14-2
 
 # Cluster control My stuff
 export LLMDBENCH_VLLM_COMMON_NAMESPACE=jchen
 export LLMDBENCH_HARNESS_NAMESPACE=jchen
+
+
+# --- test run 2
+export LLMDBENCH_DEPLOY_MODEL_LIST="Qwen/Qwen3-1.7B"
+export LLMDBENCH_CONTROL_WORK_DIR=~/data/qwen1-7/inf-sche-9-14
+export LLMDBENCH_CONTROL_WORK_DIR=~/data/qwen1-7/inf-sche-9-14-2
+export LLMDBENCH_VLLM_COMMON_NAMESPACE=jchen2
+export LLMDBENCH_HARNESS_NAMESPACE=jchen2
