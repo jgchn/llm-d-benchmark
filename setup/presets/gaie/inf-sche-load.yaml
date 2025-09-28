@@ -1,0 +1,16 @@
+# Sample EPP configuration for running without P/D with load-aware-scorer
+
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: decode-filter
+- type: single-profile-handler
+- type: load-aware-scorer
+  parameters:
+    threshold: 1
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: load-aware-scorer
+
