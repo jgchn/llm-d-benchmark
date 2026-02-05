@@ -23,7 +23,14 @@ from huggingface_hub.hf_api import ModelInfo
 import contextlib
 import io
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-    from transformers import AutoConfig, AutoModel
+    from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+
+# Optional accelerate import for empty weights strategy
+try:
+    from accelerate import init_empty_weights
+    ACCELERATE_AVAILABLE = True
+except ImportError:
+    ACCELERATE_AVAILABLE = False
 
 # Memory Overhead Constants (in GiB)
 # Empirically validated against vLLM on H100 GPUs with seq_len=16000, batch_size=1
@@ -170,7 +177,7 @@ def get_model_info_from_hf(model_name: str, hf_token: str | None = None) -> Mode
     model_info = api.model_info(model_name)
     return model_info
 
-def get_model_config_from_hf(model_name: str, hf_token: str=None) -> AutoConfig:
+def get_model_config_from_hf(model_name: str, hf_token: str | None = None) -> AutoConfig:
     """
     Returns LLM model config
     """
@@ -410,12 +417,51 @@ def get_quant_bytes(model_config: AutoConfig) -> float:
         return 0.0
 
 
-def model_memory_req(model_info: ModelInfo, model_config: AutoConfig) -> float:
+def model_memory_req(
+    model_info: ModelInfo,
+    model_config: AutoConfig,
+    hf_token: str | None = None,
+    allow_download: bool = False
+) -> float:
     """
-    Calculates the GPU memory (in GiB) required for loading the model
-    """
+    Calculates the GPU memory (in GiB) required for loading the model.
 
-    model_params = model_info.safetensors.parameters
+    Args:
+        model_info: HuggingFace model info from get_model_info_from_hf()
+        model_config: Model configuration from get_model_config_from_hf()
+        hf_token: Optional HuggingFace token for gated models
+        allow_download: If True, allows downloading model weights as fallback
+            when safetensor metadata is unavailable
+
+    Returns:
+        float: Memory requirement in GiB
+
+    Raises:
+        ValueError: If model parameters cannot be determined
+
+    Note:
+        When model_info.safetensors is None (e.g., for facebook/opt-125m),
+        this function uses get_model_params_fallback() to estimate parameters
+        using accelerate's empty weights strategy.
+    """
+    # Use safetensors.parameters if available, otherwise use fallback
+    if model_info.safetensors is not None:
+        model_params = model_info.safetensors.parameters
+    else:
+        # Try fallback for models without safetensor metadata
+        model_params = get_model_params_fallback(
+            model_info.id,
+            model_config,
+            hf_token=hf_token,
+            allow_download=allow_download
+        )
+        if model_params is None:
+            raise ValueError(
+                f"Cannot determine parameters for {model_info.id}. "
+                f"Model lacks safetensor metadata and fallback strategies failed. "
+                f"Try setting allow_download=True to download the model weights."
+            )
+
     memory = 0
 
     # Check if model is quantized
@@ -438,30 +484,154 @@ def model_memory_req(model_info: ModelInfo, model_config: AutoConfig) -> float:
 
     return memory
 
-def _extract_dtype_from_config(model_config: AutoConfig) -> str | None:
+
+def _normalize_dtype_string(dtype_str: str) -> str:
     """
-    Extract dtype from model config, checking common attribute names.
+    Normalize a dtype string to precision_to_byte() format.
+
+    Handles torch dtype strings (e.g., "torch.bfloat16") and plain strings.
 
     Returns:
-        Dtype string if found, None otherwise
+        Normalized dtype string (e.g., "BF16") or empty string if not recognized.
     """
-    for attr in ["torch_dtype", "dtype"]:
-        if hasattr(model_config, attr):
-            dtype = getattr(model_config, attr)
-            if dtype is not None:
-                return str(dtype)
+    dtype_mapping = {
+        "torch.bfloat16": "BF16",
+        "torch.float16": "F16",
+        "torch.float32": "F32",
+        "torch.float64": "F64",
+        "bfloat16": "BF16",
+        "float16": "F16",
+        "float32": "F32",
+        "float64": "F64",
+    }
+    if dtype_str in dtype_mapping:
+        return dtype_mapping[dtype_str]
+    if dtype_str.lower() in ["bf16", "f16", "f32", "f64"]:
+        return dtype_str.upper()
+    return ""
+
+
+def infer_dtype_from_config(model_config: AutoConfig) -> str:
+    """
+    Infer the primary dtype from model config for parameter counting.
+
+    Checks torch_dtype, dtype attribute, and quantization_config in order.
+    Defaults to BF16 if nothing found.
+
+    Returns:
+        str: Dtype string compatible with precision_to_byte() (e.g., "BF16", "F16", "F32")
+    """
+    # Check torch_dtype first (most common)
+    torch_dtype = getattr(model_config, "torch_dtype", None)
+    if torch_dtype is not None:
+        normalized = _normalize_dtype_string(str(torch_dtype))
+        if normalized:
+            return normalized
+
+    # Check dtype attribute
+    dtype = getattr(model_config, "dtype", None)
+    if dtype is not None:
+        return str(dtype).upper()
+
+    # Check quantization config
+    if is_quantized(model_config):
+        quant_method = get_quant_method(model_config)
+        if quant_method:
+            return quant_method.upper()
+
+    return "BF16"
+
+
+def _count_model_params(model) -> int:
+    """Count total parameters in a model."""
+    return sum(p.numel() for p in model.parameters())
+
+
+def _detect_dtype_from_model_params(model) -> str:
+    """Detect dtype from model parameters, returns BF16 as default."""
+    for p in model.parameters():
+        if p.dtype is not None:
+            normalized = _normalize_dtype_string(str(p.dtype))
+            if normalized:
+                return normalized
+    return "BF16"
+
+
+def get_model_params_fallback(
+    model_name: str,
+    model_config: AutoConfig,
+    hf_token: str | None = None,
+    allow_download: bool = False
+) -> dict[str, int] | None:
+    """
+    Fallback parameter retrieval for models without safetensor metadata.
+
+    Uses accelerate's init_empty_weights() to instantiate the model architecture
+    without downloading weights. If that fails and allow_download=True, attempts
+    to download the full model.
+
+    Args:
+        model_name: HuggingFace model identifier
+        model_config: Pre-fetched AutoConfig
+        hf_token: Optional HF token for gated models
+        allow_download: If True, allows full model download as last resort
+
+    Returns:
+        dict mapping dtype strings to parameter counts (matching safetensors.parameters format)
+        or None if retrieval fails
+
+    Example return value: {"BF16": 163037184} for facebook/opt-125m (~163M params)
+    """
+    # Strategy 1: Empty weights instantiation (fast, no download)
+    if ACCELERATE_AVAILABLE:
+        try:
+            with init_empty_weights():
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    model = AutoModelForCausalLM.from_config(
+                        model_config,
+                        trust_remote_code=True,
+                    )
+
+            total_params = _count_model_params(model)
+            if total_params > 0:
+                return {infer_dtype_from_config(model_config): total_params}
+
+        except (RuntimeError, ValueError, OSError):
+            pass
+
+    # Strategy 2: Full model download (slow, but works for all models)
+    if allow_download:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    token=hf_token,
+                )
+
+            total_params = _count_model_params(model)
+            if total_params > 0:
+                dtype = _detect_dtype_from_model_params(model)
+                del model
+                return {dtype: total_params}
+
+        except (RuntimeError, ValueError, OSError):
+            pass
+
     return None
+
 
 def inference_dtype(model_config: AutoConfig) -> str:
     """
     Returns the inference KV cache data type used.
 
-    Checks model config dtype attributes first, falls back to quantization
+    Checks torch_dtype and dtype attributes first, falls back to quantization
     method if available, returns empty string if neither found.
     """
-    dtype = _extract_dtype_from_config(model_config)
-    if dtype is not None:
-        return dtype
+    for attr in ["torch_dtype", "dtype"]:
+        dtype = getattr(model_config, attr, None)
+        if dtype is not None:
+            return str(dtype)
 
     if is_quantized(model_config):
         return get_quant_method(model_config)
@@ -621,14 +791,27 @@ def gpus_required(tp: int=1, pp: int=1, dp: int=1) -> int:
 def per_gpu_model_memory_required(model_info: ModelInfo,
                                   model_config: AutoConfig,
                                   tp: int = 1,
-                                  pp: int = 1) -> float:
+                                  pp: int = 1,
+                                  hf_token: str | None = None,
+                                  allow_download: bool = False) -> float:
     """
     Calculate model memory requirement per GPU.
 
     With parallelism: TP shards layers horizontally, PP distributes layers vertically.
     Memory per GPU = Total_model_memory / (TP × PP)
+
+    Args:
+        model_info: HuggingFace model info from get_model_info_from_hf()
+        model_config: Model configuration from get_model_config_from_hf()
+        tp: Tensor parallelism degree
+        pp: Pipeline parallelism degree
+        hf_token: Optional HuggingFace token for gated models
+        allow_download: If True, allows downloading model weights as fallback
+
+    Returns:
+        float: Memory requirement per GPU in GiB
     """
-    model_memory = model_memory_req(model_info, model_config)
+    model_memory = model_memory_req(model_info, model_config, hf_token=hf_token, allow_download=allow_download)
     return model_memory / (tp * pp)
 
 def allocatable_kv_cache_memory(model_info: ModelInfo,
@@ -640,6 +823,8 @@ def allocatable_kv_cache_memory(model_info: ModelInfo,
                             dp: int = 1,
                             max_model_len: int | None = None,
                             batch_size: int = 1,
+                            hf_token: str | None = None,
+                            allow_download: bool = False,
                             ) -> float:
     """
     Calculate allocatable memory for KV cache after accounting for model weights,
@@ -662,13 +847,15 @@ def allocatable_kv_cache_memory(model_info: ModelInfo,
         dp: Data parallelism degree
         max_model_len: Maximum sequence length (defaults to model's max_position_embeddings)
         batch_size: Batch size for activation memory estimation
+        hf_token: Optional HuggingFace token for gated models
+        allow_download: If True, allows downloading model weights as fallback
 
     Returns:
         float: Available memory for KV cache in GiB
     """
     gpu_count = tp * pp * dp
     available_memory = available_gpu_memory(gpu_memory, gpu_util) * gpu_count
-    model_size = model_memory_req(model_info, model_config) * dp
+    model_size = model_memory_req(model_info, model_config, hf_token=hf_token, allow_download=allow_download) * dp
 
     if max_model_len is None:
         try:

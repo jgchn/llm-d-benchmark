@@ -127,12 +127,129 @@ def test_model_memory_req():
     model_config = get_model_config_from_hf(gpt_oss)
     assert model_memory_req(model_info, model_config) == 13.111648678779602
 
-    # No param info for facebook/opt-125m
-    with pytest.raises(Exception):
-        hf_model = "facebook/opt-125m"
-        model_info = get_model_info_from_hf(hf_model)
-        model_config = get_model_config_from_hf(hf_model)
-        model_memory_req(model_info, model_config)
+    # facebook/opt-125m has no safetensor metadata, uses fallback
+    hf_model = "facebook/opt-125m"
+    model_info = get_model_info_from_hf(hf_model)
+    model_config = get_model_config_from_hf(hf_model)
+
+    # Verify safetensors is None (this is what triggers the fallback)
+    assert model_info.safetensors is None
+
+    # With fallback, model_memory_req should now work
+    memory = model_memory_req(model_info, model_config)
+
+    # OPT-125m has ~125M parameters, at FP32 that's ~0.5 GiB
+    # The model config shows torch_dtype=float16, so expect ~0.25 GiB
+    # Allow some tolerance for parameter counting differences
+    assert memory > 0, "Memory should be positive"
+    assert memory < 2.0, f"Memory {memory} GiB seems too high for OPT-125m"
+
+
+def test_infer_dtype_from_config():
+    """Tests that dtype is correctly inferred from model config"""
+
+    # Test model with torch_dtype=bfloat16
+    model_config = get_model_config_from_hf(qwen_model)
+    dtype = infer_dtype_from_config(model_config)
+    assert dtype == "BF16", f"Expected BF16 for Qwen, got {dtype}"
+
+    # Test model with quantization config
+    model_config = get_model_config_from_hf(gpt_oss)
+    dtype = infer_dtype_from_config(model_config)
+    # gpt_oss uses mxfp4 quantization
+    assert dtype in ["BF16", "MXFP4"], f"Expected BF16 or MXFP4 for gpt_oss, got {dtype}"
+
+    # Test model with float16 dtype (OPT)
+    model_config = get_model_config_from_hf("facebook/opt-125m")
+    dtype = infer_dtype_from_config(model_config)
+    assert dtype in ["F16", "F32", "BF16"], f"Expected F16/F32/BF16 for OPT, got {dtype}"
+
+
+def test_get_model_params_fallback_with_safetensors():
+    """Tests fallback works for models that also have safetensors (verification)"""
+
+    # Use a model with safetensors to verify fallback gives similar results
+    model_config = get_model_config_from_hf(qwen_model)
+    model_info = get_model_info_from_hf(qwen_model)
+
+    # Get parameters via fallback
+    params = get_model_params_fallback(qwen_model, model_config)
+
+    # Should return a dict
+    assert params is not None, "Fallback should work for standard models"
+    assert isinstance(params, dict), "Should return a dict"
+    assert len(params) > 0, "Should have at least one dtype entry"
+
+    # Sum should be similar to safetensors total (may differ slightly due to
+    # different parameter counting methods)
+    total_fallback = sum(params.values())
+    total_safetensors = model_info.safetensors.total
+
+    # Allow 10% difference due to counting methodology differences
+    ratio = total_fallback / total_safetensors
+    assert 0.9 <= ratio <= 1.1, \
+        f"Fallback total {total_fallback} differs significantly from safetensors {total_safetensors}"
+
+
+def test_get_model_params_fallback_without_safetensors():
+    """Tests fallback works for models without safetensors metadata"""
+
+    # facebook/opt-125m has no safetensors metadata
+    hf_model = "facebook/opt-125m"
+    model_config = get_model_config_from_hf(hf_model)
+    model_info = get_model_info_from_hf(hf_model)
+
+    # Verify safetensors is None
+    assert model_info.safetensors is None
+
+    # Get parameters via fallback
+    params = get_model_params_fallback(hf_model, model_config)
+
+    # Should return a dict with parameters
+    assert params is not None, "Fallback should work for OPT-125m"
+    assert isinstance(params, dict), "Should return a dict"
+
+    total_params = sum(params.values())
+    # OPT-125m actually has ~163M parameters (name is misleading)
+    assert 150_000_000 <= total_params <= 180_000_000, \
+        f"OPT-125m should have ~163M params, got {total_params}"
+
+
+def test_get_model_params_fallback_accelerate_unavailable(monkeypatch):
+    """Tests fallback behavior when accelerate is not available"""
+    import src.config_explorer.capacity_planner as cp
+
+    # Monkeypatch ACCELERATE_AVAILABLE to False
+    monkeypatch.setattr(cp, "ACCELERATE_AVAILABLE", False)
+
+    # Use a model with safetensors for verification
+    model_config = get_model_config_from_hf(qwen_model)
+
+    # Without accelerate and without allow_download, should return None
+    params = cp.get_model_params_fallback(qwen_model, model_config, allow_download=False)
+    assert params is None, "Should return None when accelerate unavailable and allow_download=False"
+
+
+def test_model_memory_req_uses_fallback():
+    """Tests that model_memory_req correctly uses fallback when safetensors is None"""
+
+    # Use a model without safetensors
+    hf_model = "facebook/opt-125m"
+    model_info = get_model_info_from_hf(hf_model)
+    model_config = get_model_config_from_hf(hf_model)
+
+    # Verify safetensors is None
+    assert model_info.safetensors is None
+
+    # model_memory_req should use fallback automatically
+    memory = model_memory_req(model_info, model_config)
+
+    # Should return a reasonable memory estimate
+    assert memory > 0, "Memory should be positive"
+
+    # OPT-125m at FP16/BF16 should be around 0.23-0.5 GiB
+    # At FP32 would be ~0.5 GiB
+    assert memory < 1.0, f"Memory {memory} GiB seems too high for OPT-125m"
 
 
 def test_kv_cache_req():
@@ -483,19 +600,18 @@ def test_inference_dtype():
     """Tests that inference dtype can be determined for quantized and unquantized models"""
 
     model_to_dtype = {
-        # quantized
+        # quantized - uses quant_method when torch_dtype not set
         gpt_oss: "mxfp4",
-        redhat_qwen: "bfloat16",
-        "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic": "bfloat16",
-
-        # unquantized
-        qwen_model: "bfloat16",
-        deepseek3: "bfloat16",
+        # standard models return torch dtype string
+        redhat_qwen: "torch.bfloat16",
+        "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8-dynamic": "torch.bfloat16",
+        qwen_model: "torch.bfloat16",
+        deepseek3: "torch.bfloat16",
     }
 
-    for model, expceted in model_to_dtype.items():
+    for model, expected in model_to_dtype.items():
         model_config = get_model_config_from_hf(model)
-        assert inference_dtype(model_config) == expceted
+        assert inference_dtype(model_config) == expected
 
 def test_inference_dtype_byte():
     """Tests that inference dtype byte can be determined for quantized and unquantized models"""

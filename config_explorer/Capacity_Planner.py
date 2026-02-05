@@ -134,10 +134,24 @@ def model_specification():
                     st.warning(e)
                     return None
 
+            allow_download = st.session_state.get('allow_model_download', False)
             try:
-                model_gpu_memory_req = util.pretty_round(model_memory_req(model_info, model_config))
+                if allow_download:
+                    with st.spinner("Downloading model to determine parameters..."):
+                        model_gpu_memory_req = util.pretty_round(model_memory_req(model_info, model_config, hf_token=hf_token, allow_download=True))
+                else:
+                    model_gpu_memory_req = util.pretty_round(model_memory_req(model_info, model_config, hf_token=hf_token, allow_download=False))
+            except AttributeError as e:
+                if allow_download:
+                    st.warning(f"Cannot determine model parameters. The model may use an unsupported architecture. Error: {e}")
+                else:
+                    st.warning("This model does not have safetensor metadata available. Enable 'Allow model download for missing safetensor data' in the sidebar to attempt parameter detection via model download.")
+                return None
+            except ValueError as e:
+                st.warning(f"Cannot determine model parameters: {e}")
+                return None
             except Exception as e:
-                st.warning(f"Cannot retrieve relevant information about the model, {e}. The Capacity Planner only has partial information and functionality.")
+                st.warning(f"Cannot retrieve relevant information about the model: {e}. The Capacity Planner only has partial information and functionality.")
                 return None
 
             # Display model memory calculation
@@ -305,8 +319,14 @@ Higher max model length means fewer concurrent requests can be served, \
                 dp=user_scenario.dp_size,
             )
 
-        except Exception:
-            col2.warning("Model does not have safetensors data available, cannot estimate KV cache memory requirement.")
+        except AttributeError:
+            if st.session_state.get('allow_model_download', False):
+                col2.warning("Cannot estimate KV cache memory requirement. The model may use an unsupported architecture.")
+            else:
+                col2.warning("Model does not have safetensors data available. Enable 'Allow model download for missing safetensor data' in the sidebar to attempt parameter detection.")
+            return None
+        except Exception as e:
+            col2.warning(f"Cannot estimate KV cache memory requirement: {e}")
             return None
 
         try:
@@ -510,10 +530,25 @@ def hardware_specification():
             available_gpu_count = gpus_required(tp, pp, dp)
             available_gpu_mem = available_gpu_memory(gpu_memory, user_scenario.gpu_mem_util)
 
+            allow_download = st.session_state.get('allow_model_download', False)
+            hf_token = st.session_state.get('hf_token', None)
             try:
-                model_size = model_memory_req(model_info, model_config)
-            except Exception:
-                st.warning("Model does not have safetensor data available, cannot estimate model memory.")
+                if allow_download:
+                    with st.spinner("Downloading model to determine parameters..."):
+                        model_size = model_memory_req(model_info, model_config, hf_token=hf_token, allow_download=True)
+                else:
+                    model_size = model_memory_req(model_info, model_config, hf_token=hf_token, allow_download=False)
+            except AttributeError:
+                if allow_download:
+                    st.warning("Cannot estimate model memory. The model may use an unsupported architecture.")
+                else:
+                    st.warning("Model does not have safetensor data available. Enable 'Allow model download for missing safetensor data' in the sidebar to attempt parameter detection.")
+                return None
+            except ValueError as e:
+                st.warning(f"Cannot determine model parameters: {e}")
+                return None
+            except Exception as e:
+                st.warning(f"Cannot estimate model memory: {e}")
                 return None
 
             model_size_per_gpu = per_gpu_model_memory_required(model_info, model_config, tp, pp)
@@ -652,7 +687,9 @@ def memory_util_chart(st_context):
     reserved = total_memory - available
 
     # Model weights
-    model_size = model_memory_req(model_info, model_config) * dp
+    allow_download = st.session_state.get('allow_model_download', False)
+    hf_token = st.session_state.get('hf_token', None)
+    model_size = model_memory_req(model_info, model_config, hf_token=hf_token, allow_download=allow_download) * dp
 
     # KV cache
     max_concurrency_kv_cache = kv_cache_req(model_info, model_config, user_scenario.max_model_len, concurrency)
@@ -746,6 +783,16 @@ if __name__ == '__main__':
                        layout="wide",
                        initial_sidebar_state="expanded",
                        menu_items=None)
+
+    # Sidebar configuration
+    st.sidebar.header("Advanced Options")
+    allow_model_download = st.sidebar.checkbox(
+        "Allow model download for missing safetensor data",
+        value=False,
+        help="If enabled, will download model weights to determine parameters. This can be slow for large models."
+    )
+    # Store in session state so it can be accessed by other functions
+    st.session_state['allow_model_download'] = allow_model_download
 
     st.title("Configuration Explorer")
     st.caption("This tool helps you find the most cost-effective, optimal configuration for serving models on llm-d based on hardware specification, workload characteristics, and SLO requirements.")

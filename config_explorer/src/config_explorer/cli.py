@@ -56,6 +56,9 @@ def plan_capacity(args):
     # Get HF token from environment if available
     hf_token = os.getenv("HF_TOKEN", None)
 
+    # Get allow_download flag (default False if not set)
+    allow_download = getattr(args, 'allow_download', False)
+
     try:
         # Fetch model information
         print(f"Fetching model information for {args.model}...")
@@ -67,13 +70,23 @@ def plan_capacity(args):
             "input_parameters": {
                 "model": args.model,
             },
-            "model_info": {
-                "total_parameters": model_info.safetensors.total,
-            },
+            "model_info": {},
         }
 
+        # Add total_parameters if safetensors metadata is available
+        if model_info.safetensors is not None:
+            result["model_info"]["total_parameters"] = model_info.safetensors.total
+        else:
+            result["model_info"]["total_parameters"] = None
+            result["model_info"]["note"] = "Safetensors metadata unavailable, using fallback"
+
         # Calculate model memory requirement
-        model_memory = model_memory_req(model_info, model_config)
+        model_memory = model_memory_req(
+            model_info,
+            model_config,
+            hf_token=hf_token,
+            allow_download=allow_download
+        )
         result["model_memory_gb"] = round(model_memory, 2)
 
         # Set max_model_len: use provided value or default from model's max context length
@@ -537,6 +550,13 @@ Examples:
         '-v',
         action='store_true',
         help='Enable verbose output'
+    )
+
+    plan_parser.add_argument(
+        '--allow-download',
+        action='store_true',
+        help='Allow downloading model weights if safetensor metadata is unavailable. '
+             'This may be slow for large models but enables capacity planning for all models.'
     )
 
     # Estimate command (GPU performance estimation and recommendation)
