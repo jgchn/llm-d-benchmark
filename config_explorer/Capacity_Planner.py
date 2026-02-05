@@ -105,6 +105,11 @@ def model_specification():
                                        )
         hf_token = None
 
+        # Clear fallback data if model changed
+        if 'fallback_model' in st.session_state and st.session_state['fallback_model'] != selected_model:
+            if 'fallback_params' in st.session_state:
+                del st.session_state['fallback_params']
+
         if selected_model and selected_model != "":
             # Fetch model info
             try:
@@ -134,25 +139,57 @@ def model_specification():
                     st.warning(e)
                     return None
 
-            try:
-                model_gpu_memory_req = util.pretty_round(model_memory_req(model_info, model_config))
-            except Exception as e:
-                st.warning(f"Cannot retrieve relevant information about the model, {e}. The Capacity Planner only has partial information and functionality.")
-                return None
+            # Check if safetensors metadata is available
+            if not has_safetensors_metadata(model_info):
+                st.warning("Safetensors metadata not available for this model.")
+                st.info("You can download the model architecture to get parameter info. "
+                        "Note: This may take a while for large models.")
+
+                if st.button("Download model architecture"):
+                    with st.spinner("Loading model architecture (this may take a while for large models)..."):
+                        fallback_params = get_model_params_from_download(selected_model, hf_token)
+                        if fallback_params is not None:
+                            st.session_state['fallback_params'] = fallback_params
+                            st.session_state['fallback_model'] = selected_model
+                            st.success(f"Found {fallback_params['total']:,} parameters")
+                            st.rerun()
+                        else:
+                            st.error("Unable to load model architecture. This model may use a custom architecture not supported by transformers.")
+                            return None
+
+                # Check if we have fallback data from previous download
+                if 'fallback_params' not in st.session_state:
+                    return None
+
+                # Use fallback data
+                safetensors_data = SafetensorsData.from_fallback(st.session_state['fallback_params'])
+                model_gpu_memory_req = util.pretty_round(model_memory_req_from_safetensors(safetensors_data, model_config))
+
+            else:
+                # Normal path - safetensors available
+                try:
+                    safetensors_data = SafetensorsData.from_model_info(model_info)
+                    model_gpu_memory_req = util.pretty_round(model_memory_req(model_info, model_config))
+                except Exception as e:
+                    st.warning(f"Cannot retrieve relevant information about the model, {e}. The Capacity Planner only has partial information and functionality.")
+                    return None
 
             # Display model memory calculation
             col1, col2 = st.columns(2)
 
             col1.info(f"Size of model in memory: ~{model_gpu_memory_req} GB")
-            with col2.expander("See how model size is calculated below"):
-                st.write("""Below shows how model memory is estimated. The number of parameters and precision are fetched from Hugging Face. Common data types include `BF16` (floating point 16-bit) and `F8_E4M3` (floating point 8-bit, 4 for exponents and 3 for mantissa). The total is then summed.""")
 
-                if is_quantized(model_config):
-                    quant_method = get_quant_method(model_config)
-                    st.write(f"This model contains a quantization config. The quantization method is: `{quant_method}`")
+            # Only show detailed breakdown if we have safetensors data from HF (not fallback)
+            if has_safetensors_metadata(model_info):
+                with col2.expander("See how model size is calculated below"):
+                    st.write("""Below shows how model memory is estimated. The number of parameters and precision are fetched from Hugging Face. Common data types include `BF16` (floating point 16-bit) and `F8_E4M3` (floating point 8-bit, 4 for exponents and 3 for mantissa). The total is then summed.""")
 
-                data = get_model_size_df(model_info, model_config)
-                st.dataframe(data, hide_index=True)
+                    if is_quantized(model_config):
+                        quant_method = get_quant_method(model_config)
+                        st.write(f"This model contains a quantization config. The quantization method is: `{quant_method}`")
+
+                    data = get_model_size_df(model_info, model_config)
+                    st.dataframe(data, hide_index=True)
 
         else:
             return None

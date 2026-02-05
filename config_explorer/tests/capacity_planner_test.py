@@ -641,3 +641,124 @@ def test_estimate_vllm_activation_memory_moe():
     dense_activation = estimate_vllm_activation_memory(dense_config, tp=1)
     assert moe_activation > dense_activation, \
         f"MoE activation {moe_activation} should be > dense activation {dense_activation}"
+
+
+def test_map_torch_dtype_to_safetensors():
+    """Tests mapping torch dtypes to safetensors dtype strings"""
+    import torch
+
+    # Test standard dtypes
+    assert map_torch_dtype_to_safetensors(torch.float32, None) == "F32"
+    assert map_torch_dtype_to_safetensors(torch.float16, None) == "F16"
+    assert map_torch_dtype_to_safetensors(torch.bfloat16, None) == "BF16"
+    assert map_torch_dtype_to_safetensors(torch.float64, None) == "F64"
+    assert map_torch_dtype_to_safetensors(torch.int8, None) == "I8"
+    assert map_torch_dtype_to_safetensors(torch.int16, None) == "I16"
+    assert map_torch_dtype_to_safetensors(torch.int32, None) == "I32"
+    assert map_torch_dtype_to_safetensors(torch.int64, None) == "I64"
+
+    # Test with quantization config override
+    mock_config = type('MockConfig', (), {
+        'quantization_config': {'quant_method': 'fp8'}
+    })()
+    # When config has quantization, use that for low-precision dtypes
+    result = map_torch_dtype_to_safetensors(torch.float16, mock_config)
+    assert result == "F16"  # F16 is high precision, no override
+
+
+def test_get_model_params_from_download():
+    """Tests fallback parameter retrieval via model download"""
+    # Use a small model for testing
+    facebook_model = "facebook/opt-125m"
+
+    result = get_model_params_from_download(facebook_model)
+
+    # Should return a dict with 'parameters' and 'total' keys
+    assert result is not None
+    assert "parameters" in result
+    assert "total" in result
+
+    # Parameters should be a dict of dtype -> count
+    assert isinstance(result["parameters"], dict)
+    assert len(result["parameters"]) > 0
+
+    # Total should be positive and match sum of parameters
+    assert result["total"] > 0
+    assert result["total"] == sum(result["parameters"].values())
+
+    # For OPT-125M, we expect around 125M parameters
+    assert 100_000_000 < result["total"] < 200_000_000
+
+
+def test_get_model_params_from_download_invalid_model():
+    """Tests fallback returns None for invalid model"""
+    result = get_model_params_from_download("invalid/nonexistent-model-12345")
+    assert result is None
+
+
+def test_has_safetensors_metadata():
+    """Tests detection of safetensors metadata availability"""
+    # Model with safetensors
+    qwen_info = get_model_info_from_hf(qwen_model)
+    assert has_safetensors_metadata(qwen_info) == True
+
+    # Model without safetensors
+    facebook_info = get_model_info_from_hf("facebook/opt-125m")
+    assert has_safetensors_metadata(facebook_info) == False
+
+
+def test_safetensors_data_wrapper():
+    """Tests SafetensorsData wrapper for unified interface"""
+    # Test with real safetensors data
+    qwen_info = get_model_info_from_hf(qwen_model)
+    wrapper = SafetensorsData.from_model_info(qwen_info)
+
+    assert wrapper.total == qwen_info.safetensors.total
+    assert wrapper.parameters == qwen_info.safetensors.parameters
+
+    # Test with fallback dict
+    fallback_dict = {"parameters": {"BF16": 1000000}, "total": 1000000}
+    wrapper2 = SafetensorsData.from_fallback(fallback_dict)
+
+    assert wrapper2.total == 1000000
+    assert wrapper2.parameters == {"BF16": 1000000}
+
+
+def test_model_memory_req_with_safetensors_data():
+    """Tests model_memory_req works with SafetensorsData wrapper"""
+    model_info = get_model_info_from_hf(qwen_model)
+    model_config = get_model_config_from_hf(qwen_model)
+
+    # Original way (should still work)
+    original_result = model_memory_req(model_info, model_config)
+
+    # New way with SafetensorsData
+    safetensors_data = SafetensorsData.from_model_info(model_info)
+    new_result = model_memory_req_from_safetensors(safetensors_data, model_config)
+
+    assert original_result == new_result
+
+
+def test_model_memory_req_with_fallback_integration():
+    """Integration test: calculate memory for model without safetensors using fallback"""
+    facebook_model = "facebook/opt-125m"
+
+    # Get model info and config
+    model_info = get_model_info_from_hf(facebook_model)
+    model_config = get_model_config_from_hf(facebook_model)
+
+    # Verify safetensors is not available
+    assert has_safetensors_metadata(model_info) == False
+
+    # Use fallback
+    fallback_params = get_model_params_from_download(facebook_model)
+    assert fallback_params is not None
+
+    safetensors_data = SafetensorsData.from_fallback(fallback_params)
+
+    # Calculate memory
+    memory = model_memory_req_from_safetensors(safetensors_data, model_config)
+
+    # OPT-125M should be roughly 0.25GB in FP32 or 0.125GB in FP16
+    # (125M params * 2 bytes = 250MB for FP16)
+    assert 0.1 < memory < 1.0, f"Memory {memory} GB outside expected range for OPT-125M"

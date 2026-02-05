@@ -7,6 +7,9 @@ This module implements memory estimation formulas for LLM inference with vLLM:
 - Activation memory during forward pass
 - CUDA graph and system overhead
 
+For models without safetensors metadata on HuggingFace, use get_model_params_from_download()
+to retrieve parameter information by instantiating the model architecture without weights.
+
 Calculates minimum GPU requirements based on model architecture, parallelism
 configuration, and workload characteristics.
 """
@@ -41,6 +44,31 @@ BYTES_PER_GIB = 1024 ** 3
 FP16_BF16_BYTES = 2  # Computational dtype for most inference workloads
 HIGH_PRECISION_THRESHOLD_BYTES = 2  # Distinguish quantized vs full-precision
 DEFAULT_KV_CACHE_DTYPE_BYTES = 1  # FP8 KV cache default
+
+@dataclass
+class SafetensorsData:
+    """
+    Unified wrapper for safetensors parameter data.
+    Works with both HuggingFace ModelInfo.safetensors and fallback dicts.
+    """
+    parameters: dict
+    total: int
+
+    @classmethod
+    def from_model_info(cls, model_info: ModelInfo) -> "SafetensorsData":
+        """Create from HuggingFace ModelInfo with safetensors data"""
+        return cls(
+            parameters=model_info.safetensors.parameters,
+            total=model_info.safetensors.total
+        )
+
+    @classmethod
+    def from_fallback(cls, fallback_dict: dict) -> "SafetensorsData":
+        """Create from fallback dict returned by get_model_params_from_download()"""
+        return cls(
+            parameters=fallback_dict["parameters"],
+            total=fallback_dict["total"]
+        )
 
 class AttentionType(StrEnum):
     """Attention mechanism types supported by the capacity planner."""
@@ -170,6 +198,24 @@ def get_model_info_from_hf(model_name: str, hf_token: str | None = None) -> Mode
     model_info = api.model_info(model_name)
     return model_info
 
+def has_safetensors_metadata(model_info: ModelInfo) -> bool:
+    """
+    Check if model has safetensors metadata available.
+
+    Args:
+        model_info: ModelInfo from HuggingFace API
+
+    Returns:
+        True if safetensors.parameters is available and non-empty
+    """
+    if model_info.safetensors is None:
+        return False
+    if not hasattr(model_info.safetensors, 'parameters'):
+        return False
+    if model_info.safetensors.parameters is None:
+        return False
+    return len(model_info.safetensors.parameters) > 0
+
 def get_model_config_from_hf(model_name: str, hf_token: str=None) -> AutoConfig:
     """
     Returns LLM model config
@@ -182,6 +228,46 @@ def get_model_config_from_hf(model_name: str, hf_token: str=None) -> AutoConfig:
     )
 
     return model_config
+
+def get_model_params_from_download(model_name: str, hf_token: str | None = None) -> dict | None:
+    """
+    Fallback for models without safetensors metadata.
+    Uses init_empty_weights() to avoid downloading actual weights.
+
+    Args:
+        model_name: HuggingFace model name (e.g., "facebook/opt-125m")
+        hf_token: Optional HuggingFace token for gated models
+
+    Returns:
+        Dict compatible with model_info.safetensors structure:
+            {"parameters": {"BF16": 7000000000, ...}, "total": 7000000000}
+        Returns None if model cannot be loaded.
+    """
+    try:
+        from accelerate import init_empty_weights
+        from transformers import AutoModelForCausalLM
+
+        # Fetch config first (small download)
+        config = get_model_config_from_hf(model_name, hf_token)
+
+        # Create empty model without downloading weights
+        with init_empty_weights():
+            model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+
+        # Count parameters by dtype
+        params_by_dtype = {}
+        for name, param in model.named_parameters():
+            dtype_key = map_torch_dtype_to_safetensors(param.dtype, config)
+            params_by_dtype[dtype_key] = params_by_dtype.get(dtype_key, 0) + param.numel()
+
+        total = sum(params_by_dtype.values())
+
+        return {"parameters": params_by_dtype, "total": total}
+
+    except Exception as e:
+        # Log error but return None to allow graceful handling
+        print(f"Warning: Could not load model architecture for {model_name}: {e}")
+        return None
 
 def get_text_config(model_config: AutoConfig) -> dict:
     """
@@ -352,6 +438,39 @@ def precision_to_byte(precision: str) -> float:
 
     raise ValueError("Unsupported precision type.")
 
+def map_torch_dtype_to_safetensors(torch_dtype, model_config) -> str:
+    """
+    Map torch dtype to safetensors dtype string.
+
+    Args:
+        torch_dtype: A torch.dtype object (e.g., torch.float16)
+        model_config: Model config to check for quantization overrides (can be None)
+
+    Returns:
+        Safetensors-compatible dtype string (e.g., "F16", "BF16")
+    """
+    import torch
+
+    dtype_mapping = {
+        torch.float64: "F64",
+        torch.float32: "F32",
+        torch.float16: "F16",
+        torch.bfloat16: "BF16",
+        torch.int64: "I64",
+        torch.int32: "I32",
+        torch.int16: "I16",
+        torch.int8: "I8",
+        torch.uint8: "U8",
+        torch.bool: "BOOL",
+    }
+
+    if torch_dtype in dtype_mapping:
+        return dtype_mapping[torch_dtype]
+
+    # Fallback: try to extract from dtype name
+    dtype_str = str(torch_dtype).replace("torch.", "").upper()
+    return dtype_str
+
 def parameter_memory_req(parameter: int, precision: str) -> float:
     """
     Calculates the memory requirement (in GiB) for the number of parameters for the specified precision
@@ -438,6 +557,41 @@ def model_memory_req(model_info: ModelInfo, model_config: AutoConfig) -> float:
 
     return memory
 
+def model_memory_req_from_safetensors(safetensors_data: SafetensorsData, model_config: AutoConfig) -> float:
+    """
+    Calculates the GPU memory (in GiB) required for loading the model.
+    Works with SafetensorsData wrapper (from either HF API or fallback download).
+
+    Args:
+        safetensors_data: SafetensorsData with parameters dict
+        model_config: Model configuration for quantization info
+
+    Returns:
+        Memory requirement in GiB
+    """
+    model_params = safetensors_data.parameters
+    memory = 0
+
+    # Check if model is quantized
+    quantization_byte = None
+    if is_quantized(model_config):
+        quantization_byte = get_quant_bytes(model_config)
+
+    for precision, num_params in model_params.items():
+        precision_in_byte = precision_to_byte(precision)
+
+        # IF FP16 or FP32, keep it as so
+        if precision_in_byte >= 2:
+            memory += parameter_memory_req(num_params, precision)
+        else:
+            # Otherwise, check if model is quantized, and use that as the precision
+            if quantization_byte is not None:
+                memory += parameter_precision_memory_req(num_params, quantization_byte)
+            else:
+                memory += parameter_memory_req(num_params, precision)
+
+    return memory
+
 def _extract_dtype_from_config(model_config: AutoConfig) -> str | None:
     """
     Extract dtype from model config, checking common attribute names.
@@ -449,7 +603,11 @@ def _extract_dtype_from_config(model_config: AutoConfig) -> str | None:
         if hasattr(model_config, attr):
             dtype = getattr(model_config, attr)
             if dtype is not None:
-                return str(dtype)
+                dtype_str = str(dtype)
+                # Strip "torch." prefix if present
+                if dtype_str.startswith("torch."):
+                    dtype_str = dtype_str[6:]
+                return dtype_str
     return None
 
 def inference_dtype(model_config: AutoConfig) -> str:

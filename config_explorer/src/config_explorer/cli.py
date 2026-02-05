@@ -21,6 +21,10 @@ from config_explorer.capacity_planner import (
     find_possible_tp,
     gpus_required,
     per_gpu_model_memory_required,
+    has_safetensors_metadata,
+    get_model_params_from_download,
+    SafetensorsData,
+    model_memory_req_from_safetensors,
 )
 from config_explorer.recommender.recommender import GPURecommender
 from llm_optimizer.predefined.gpus import GPU_SPECS
@@ -62,18 +66,36 @@ def plan_capacity(args):
         model_info = get_model_info_from_hf(args.model, hf_token)
         model_config = get_model_config_from_hf(args.model, hf_token)
 
+        # Check for safetensors metadata
+        safetensors_data = None
+        if not has_safetensors_metadata(model_info):
+            print(f"Warning: Safetensors metadata not available for '{args.model}'.")
+
+            if args.fallback_download:
+                print("Downloading model architecture...")
+                fallback_params = get_model_params_from_download(args.model, hf_token)
+                if fallback_params is None:
+                    sys.exit("Error: Unable to load model architecture.")
+                safetensors_data = SafetensorsData.from_fallback(fallback_params)
+                print(f"Found {safetensors_data.total:,} parameters")
+            else:
+                sys.exit("Error: Cannot calculate memory requirements without safetensors metadata.\n"
+                         "Use --fallback-download to download model architecture and get parameter info.")
+        else:
+            safetensors_data = SafetensorsData.from_model_info(model_info)
+
         # Prepare result dictionary
         result = {
             "input_parameters": {
                 "model": args.model,
             },
             "model_info": {
-                "total_parameters": model_info.safetensors.total,
+                "total_parameters": safetensors_data.total,
             },
         }
 
         # Calculate model memory requirement
-        model_memory = model_memory_req(model_info, model_config)
+        model_memory = model_memory_req_from_safetensors(safetensors_data, model_config)
         result["model_memory_gb"] = round(model_memory, 2)
 
         # Set max_model_len: use provided value or default from model's max context length
@@ -537,6 +559,12 @@ Examples:
         '-v',
         action='store_true',
         help='Enable verbose output'
+    )
+
+    plan_parser.add_argument(
+        '--fallback-download',
+        action='store_true',
+        help='Download model architecture to get parameter info if safetensors metadata is unavailable. Disabled by default.'
     )
 
     # Estimate command (GPU performance estimation and recommendation)
