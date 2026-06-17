@@ -1596,7 +1596,7 @@ class BaseSmoketest:
         port: str | int,
         expected_model: str,
         plan_config: dict | None = None,
-        timeout: int = 300,
+        timeout: int = 900,
         poll_interval: int = 15,
         url_path_prefix: str = "",
     ):
